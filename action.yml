@@ -1,4 +1,4 @@
-name: Version Bump Action
+name: Bump Version Action
 description: Automatically bumps the version based on commit message keywords
 author: Matthew Oestreich
 runs:

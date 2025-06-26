@@ -1,5 +1,6 @@
-name: Automated Version Bump
-description: Automated version bump for npm packages.
+name: Version Bump Action
+description: Automatically bumps the version based on commit message keywords
+author: Matthew Oestreich
 runs:
   using: node20
   main: index.js

@@ -3,6 +3,10 @@ const { execSync, spawn } = require('child_process');
 const { existsSync } = require('fs');
 const { EOL } = require('os');
 const path = require('path');
+const fs = require('fs');
+const https = require('https');
+
+if (!process.env.GITHUB_TOKEN) exitFailure('Missing GITHUB_TOKEN');
 
 // Change working directory if user defined PACKAGEJSON_DIR
 if (process.env.PACKAGEJSON_DIR) {
@@ -19,8 +23,29 @@ const pkg = getPackageJson();
 
 (async () => {
   const event = process.env.GITHUB_EVENT_PATH ? require(process.env.GITHUB_EVENT_PATH) : {};
+  const isWorkflowRun = process.env.GITHUB_EVENT_NAME === 'workflow_run';
+  let messages = [];
 
-  if (!event.commits && !process.env['INPUT_VERSION-TYPE']) {
+  if (isWorkflowRun) {
+    console.log('Detected workflow_run, fetching commit message via API...');
+    try {
+      messages = await getCommitMessageFromSHA(event.workflow_run.head_sha);
+    } catch (err) {
+      exitFailure(`Failed to fetch commit message for SHA: ${event.workflow_run.head_sha}\n${err.message}`);
+      return;
+    }
+  } else if (event.commits) {
+    const checkLastCommitOnly = process.env['INPUT_CHECK-LAST-COMMIT-ONLY'] || 'false';
+    if (checkLastCommitOnly === 'true') {
+      console.log('Only checking the last commit...');
+      const commit = event.commits[event.commits.length - 1];
+      messages = commit ? [commit.message + '\n' + commit.body] : [];
+    } else {
+      messages = event.commits.map((commit) => commit.message + '\n' + commit.body);
+    }
+  }
+
+  if ((!messages.length && !event.commits) && !process.env['INPUT_VERSION-TYPE']) {
     console.log("Couldn't find any commits in this event, incrementing patch version...");
   }
 
@@ -35,17 +60,6 @@ const pkg = getPackageJson();
   const tagSuffix = process.env['INPUT_TAG-SUFFIX'] || '';
   console.log('tagPrefix:', tagPrefix);
   console.log('tagSuffix:', tagSuffix);
-
-  const checkLastCommitOnly = process.env['INPUT_CHECK-LAST-COMMIT-ONLY'] || 'false';
-
-  let messages = [];
-  if (checkLastCommitOnly === 'true') {
-    console.log('Only checking the last commit...');
-    const commit = event.commits && event.commits.lengths > 0 ? event.commits[event.commits.length - 1] : null;
-    messages = commit ? [commit.message + '\n' + commit.body] : [];
-  } else {
-    messages = event.commits ? event.commits.map((commit) => commit.message + '\n' + commit.body) : [];
-  }
 
   const commitMessage = process.env['INPUT_COMMIT-MESSAGE'] || 'ci: version bump to {{version}}';
   console.log('commit messages:', messages);
@@ -331,4 +345,40 @@ function runInWorkspace(command, args) {
     });
   });
   //return execa(command, args, { cwd: workspace });
+}
+
+async function getCommitMessageFromSHA(sha) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.github.com',
+      path: `/repos/${process.env.GITHUB_REPOSITORY}/commits/${sha}`,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'gh-action-bump-version',
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          return reject(new Error(`GitHub API error: ${res.statusCode} - ${body}`));
+        }
+
+        try {
+          const data = JSON.parse(body);
+          const msg = data.commit.message;
+          resolve([msg]);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.end();
+  });
 }
